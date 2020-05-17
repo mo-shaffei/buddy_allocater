@@ -4,16 +4,8 @@
 #include "Headers/MessageBuffer.h"
 #include "Headers/EventsQueue.h"
 #include "Headers/DoubleLinkedList.h"
+#include "Headers/ProcessQueue.h"
 #include <math.h>
-
-#define SIZE_2 0
-#define SIZE_4 1
-#define SIZE_8 2
-#define SIZE_16 3
-#define SIZE_32 4
-#define SIZE_64 5
-#define SIZE_128 6
-#define SIZE_256 7
 
 void ProcessArrivalHandler(int);
 
@@ -25,13 +17,19 @@ int ReceiveProcess();
 
 void CleanResources();
 
-void ExecuteProcess();
+int ExecuteProcess();
 
-void ChildHandler(int signum);
+void ChildHandler(int);
 
 void LogEvents(unsigned int, unsigned int);
 
 void AddEvent(enum EventType);
+
+int AllocateMem(int);
+
+void FreeMem(int, int);
+
+int IsEven(int);
 
 int gMsgQueueId = 0;
 Process *gpCurrentProcess = NULL;
@@ -40,6 +38,7 @@ short gSwitchContext = 0;
 event_queue gEventQueue = NULL;
 LIST gFreeMemList[8];
 int gFreeMem = 1024;
+queue gTempQueue;
 
 int main(int argc, char *argv[]) {
     printf("SRTN: *** Scheduler here\n");
@@ -47,6 +46,7 @@ int main(int argc, char *argv[]) {
     InitIPC();
     //initialize processes heap
     gProcessHeap = (heap_t *) calloc(1, sizeof(heap_t));
+    gTempQueue = NewProcQueue();
     gEventQueue = NewEventQueue();
     InitMemList();
 
@@ -57,8 +57,16 @@ int main(int argc, char *argv[]) {
     pause(); //wait for the first process to arrive
     unsigned int start_time = getClk(); //store simulation start time
     while ((gpCurrentProcess = HeapPop(gProcessHeap)) != NULL) {
-        ExecuteProcess(); //starts the process with the least remaining time and handles context switching
+        if (ExecuteProcess() == -1) {//starts the process with the least remaining time and handles context switching
+            ProcEnqueue(gTempQueue, gpCurrentProcess); //if execution failed place this process in the temp queue
+            continue;
+        }
         gSwitchContext = 0; //toggle switch context off until a signal handler turns it on
+        while (!ProcQueueEmpty(gTempQueue)) {//re-push all processes that failed to run in the main heap
+            Process *pProcess;
+            ProcDequeue(gTempQueue, &pProcess);
+            HeapPush(gProcessHeap, pProcess->mRemainTime, pProcess);
+        }
         while (!gSwitchContext)
             pause(); //pause to avoid busy waiting and only wakeup to handle signals
     }
@@ -77,8 +85,12 @@ void ProcessArrivalHandler(int signum) {
     //then subtract this quantity from total runtime to get remaining runtime
     gpCurrentProcess->mRemainTime =
             gpCurrentProcess->mRuntime - (getClk() - (gpCurrentProcess->mArrivalTime + gpCurrentProcess->mWaitTime));
-    
-    if (HeapPeek(gProcessHeap)->mRuntime < gpCurrentProcess->mRemainTime) { //if a new process has a shorter runtime
+
+    Process *pNewProcess = HeapPeek(gProcessHeap);
+    if (pNewProcess->mRuntime < gpCurrentProcess->mRemainTime) { //if a new process has a shorter runtime
+        if (pNewProcess->mMemAlloc > gFreeMem) //no memory available for this process so no context switching
+            return;
+
         if (kill(gpCurrentProcess->mPid, SIGTSTP) == -1) //stop current process
             perror("RR: *** Error stopping process");
 
@@ -106,7 +118,6 @@ int ReceiveProcess() {
     while (msgrcv(gMsgQueueId, (void *) &msg, sizeof(msg.mProcess), 0, IPC_NOWAIT) == -1) {
         perror("SRTN: *** Error in receive");
         return -1;
-
     }
 
     //below is executed if a message was retrieved from the message queue
@@ -119,7 +130,7 @@ int ReceiveProcess() {
         pProcess = malloc(sizeof(Process));
     }
     *pProcess = msg.mProcess; //store the process received in the allocated space
-    pProcess->mMemAlloc = ceil(log2(pProcess->mMemsize));
+    pProcess->mMemAlloc = pow(2, ceil(log2(pProcess->mMemSize))); //approximate to the first power of 2
     //push the process pointer into the process heap, and use the process runtime as the value to sort the heap with
     HeapPush(gProcessHeap, pProcess->mRemainTime, pProcess);
 
@@ -139,8 +150,12 @@ void CleanResources() {
     exit(EXIT_SUCCESS);
 }
 
-void ExecuteProcess() {
+int ExecuteProcess() {
     if (gpCurrentProcess->mRuntime == gpCurrentProcess->mRemainTime) { //if this process never ran before
+        gpCurrentProcess->mMemAddr = AllocateMem(gpCurrentProcess->mMemAlloc); //allocate memory for this process
+        if (gpCurrentProcess->mMemAddr == -1) //if allocation failed
+            return -1;
+
         gpCurrentProcess->mPid = fork(); //fork a new child and store its pid in the process struct
         while (gpCurrentProcess->mPid == -1) { //if forking fails
             perror("SRTN: *** Error forking process");
@@ -161,17 +176,18 @@ void ExecuteProcess() {
         if (kill(gpCurrentProcess->mPid, SIGCONT) == -1) { //continue process
             printf("SRTN: *** Error resuming process %d", gpCurrentProcess->mId);
             perror(NULL);
-            return;
+            return -1;
         }
         gpCurrentProcess->mWaitTime += getClk() - gpCurrentProcess->mLastStop;  //update the waiting time of the process
         AddEvent(CONT);
     }
+    return 0;
 };
 
 void ChildHandler(int signum) {
     if (!waitpid(gpCurrentProcess->mPid, NULL, WNOHANG)) //if current process did not terminate
         return;
-
+    FreeMem(gpCurrentProcess->mMemAddr, gpCurrentProcess->mMemAlloc);  //free memory allocated for this process
     gSwitchContext = 1; //set flag to 1 so main loop knows it's time to switch context
     gpCurrentProcess->mRemainTime = 0; //process finished so remaining time should be zero
     AddEvent(FINISH);
@@ -242,5 +258,71 @@ void InitMemList() {
 
     //we have four 256 partitions at addresses 0, 256, 512, and 768
     for (int i = 0; i < 1024; i += 256)
-        insertSort(gFreeMemList[SIZE_256], i);
+        InsertSort(gFreeMemList[7], i);
+}
+
+int AllocateMem(int mem_size) {
+    int desired_index = (int) log2(mem_size) - 1; //calculate the index of the list containing this allocation size
+    int found_index = desired_index; //start searching in the desired list
+    while (IsListEmpty(gFreeMemList[found_index])) { //as long as no allocation of this size is available in this list
+        found_index++; //increment index to search in the next list with larger allocation unit
+
+        if (found_index > 7) //no memory is available so reject this allocation request
+            return -1;
+    }
+
+    //if the free memory is in a list of a bigger allocation unit we need to split this large block to our desired size
+    while (found_index != desired_index) { //keep splitting bigger blocks until we find a suitable block
+        NODE node = RemHead(gFreeMemList[found_index]); //get the first available memory block in the current list
+        int addr = node->data; //store the address of the memory block
+        free(node); //remove this block from this unit as it will be divided in half
+        int current_alloc = pow(2, found_index + 1); //calculate the block size of the current unit
+        int split_addr = (2 * addr + current_alloc) / 2; //calculate the address which divides the block in half
+        //int split_addr = (addr + current_alloc) / 2; //calculate the address which divides the block in half
+        found_index--; //go down one allocation unit
+        //store the two new blocks in the smaller allocation unit
+        InsertSort(gFreeMemList[found_index], split_addr);
+        InsertSort(gFreeMemList[found_index], addr);
+    }
+    //after the above loop we are sure that a block of the desired size is available
+    NODE node = RemHead(gFreeMemList[desired_index]); //get the first available memory block
+    int addr = node->data; //store the address of the memory block
+    free(node); //remove this block from this unit as it will be allocated to the requesting process
+    gFreeMem -= mem_size; //subtract this block size from the free memory
+    return addr; //return the address of this block to the requesting process
+}
+
+void FreeMem(int mem_addr, int mem_size) {
+    int index = (int) log2(mem_size) - 1; //calculate the index of the list containing this allocation size
+    InsertSort(gFreeMemList[index], mem_addr); //add this memory address to the corresponding list
+
+    while (index < 7) //if this block is less than 256 in size then we might need to join small blocks
+    {
+        NODE node = GetHead(gFreeMemList[index]); //get the first memory block in this list
+        int current_mem_size = (int) pow(2, index + 1); //calculate the block size of the current unit
+        while (node->succ != NULL) { //traverse this list until the tail's predecessor has been visited
+            //if this is a valid merge(index of this address is even and next address is exactly after one block)
+            if (IsEven(node->data / mem_size) && (node->succ->data - node->data) == current_mem_size) {
+                InsertSort(gFreeMemList[index + 1], node->data); //add the address of first block to the larger list
+                NODE temp = node->succ->succ; //get the first block after the two blocks that will be merged together
+                //remove both blocks from the current list as they have been merged into one in the next list
+                free(RemoveNode(gFreeMemList[index], node->succ));
+                free(RemoveNode(gFreeMemList[index], node));
+                //next node to traverse from is the one after the two merged blocks
+                node = temp;
+                if (!temp) //if this node is NULL then there are no more blocks to inspect in this list
+                    break;
+                continue; //otherwise start loop from beg and inspect the next node
+            }
+            node = node->succ; //iterate to the next node to insepct it
+        }
+        index++; //after finishing inspecting the current list increment index to go the next list
+    }
+    gFreeMem += mem_size; //add the freed memory to the free memory variable
+}
+
+int IsEven(int num) {
+    if (num % 2 == 0)
+        return 1;
+    return 0;
 }

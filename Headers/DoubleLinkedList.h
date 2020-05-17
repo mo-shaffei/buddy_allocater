@@ -13,7 +13,6 @@
 struct List {
     struct MNode *head;
     struct MNode *tail;
-    struct MNode *tail_pred;
 };
 
 struct MNode {
@@ -38,22 +37,16 @@ LIST NewList(void);
 int IsListEmpty(LIST);
 
 /*
-** NODE n = GetTail(LIST l)
-** get the tail node of the list, without removing it
-*/
-NODE GetTail(LIST);
-
-/*
 ** NODE n = GetHead(LIST l)
 ** get the head node of the list, without removing it
 */
 NODE GetHead(LIST);
 
 /*
-** NODE rn = AddTail(LIST l, NODE n)
-** add the node n to the tail of the list l, and return it (rn==n)
+** NODE n = GetTail(LIST l)
+** get the tail node of the list, without removing it
 */
-NODE AddTail(LIST, int);
+NODE GetTail(LIST);
 
 /*
 ** NODE rn = AddHead(LIST l, NODE n)
@@ -74,12 +67,6 @@ NODE RemHead(LIST);
 NODE RemTail(LIST);
 
 /*
-** NODE rn = InsertAfter(LIST l, NODE r, NODE n)
-** insert the node n after the node r, in the list l; return n (rn==n)
-*/
-NODE InsertAfter(LIST, NODE, NODE);
-
-/*
 ** NODE rn = RemoveNode(LIST l, NODE n)
 ** remove the node n (that must be in the list l) from the list and return it (rn==n)
 */
@@ -88,69 +75,70 @@ NODE RemoveNode(LIST, NODE);
 LIST NewList(void) {
     LIST tl = malloc(sizeof(struct List));
     if (tl != NULL) {
-        tl->tail_pred = (NODE) &tl->head;
-        tl->tail = NULL;
-        tl->head = (NODE) &tl->tail;
+        tl->head = tl->tail = NULL;
         return tl;
     }
     return NULL;
 }
 
 int IsListEmpty(LIST l) {
-    return (l->head->succ == 0);
+    return (l->head == NULL);
 }
 
 NODE GetHead(LIST l) {
     return l->head;
 }
 
-NODE GetTail(LIST) {
-    return l->tail_pred;
-}
-
-NODE AddTail(LIST l, int data) {
-    NODE n = malloc(sizeof(NODE));
-    n->data = data;
-    n->succ = (NODE) &l->tail;
-    n->pred = l->tail_pred;
-    l->tail_pred->succ = n;
-    l->tail_pred = n;
-    return n;
+NODE GetTail(LIST l) {
+    return l->tail;
 }
 
 NODE AddHead(LIST l, int data) {
     NODE n = malloc(sizeof(NODE));
     n->data = data;
+    n->pred = NULL;
     n->succ = l->head;
-    n->pred = (NODE) &l->head;
+    if (l->head == NULL) {
+        l->head = l->tail = n;
+        return n;
+    }
     l->head->pred = n;
     l->head = n;
     return n;
 }
 
 NODE RemHead(LIST l) {
-    NODE h;
-    h = l->head;
-    l->head = l->head->succ;
-    l->head->pred = (NODE) &l->head;
+    NODE h = l->head;
+
+    if (h == NULL)
+        return NULL;
+
+    if (h->succ == NULL) {
+        l->head = l->tail = NULL;
+        return h;
+    }
+
+    h->succ->pred = NULL;
+    l->head = h->succ;
     return h;
 }
 
 NODE RemTail(LIST l) {
-    NODE t;
-    t = l->tail_pred;
-    l->tail_pred = l->tail_pred->pred;
-    l->tail_pred->succ = (NODE) &l->tail;
+    NODE t = l->tail;
+
+    if (t == NULL)
+        return NULL;
+
+    if (t->pred == NULL) {
+        l->head = l->tail = NULL;
+        return t;
+    }
+
+    t->pred->succ = NULL;
+    l->head = t->pred;
     return t;
 }
 
-NODE InsertAfter(LIST l, NODE n, NODE r) {
-    n->pred = r;
-    n->succ = r->succ;
-    n->succ->pred = n;
-    r->succ = n;
-    return n;
-}
 
 NODE RemoveNode(LIST l, NODE n) {
     if (n == l->head)
@@ -163,7 +151,7 @@ NODE RemoveNode(LIST l, NODE n) {
     return n;
 }
 
-void insertSort(LIST l, int data) {
+void InsertSort(LIST l, int data) {
     NODE n = AddHead(l, data);
     while (n->succ != NULL) {
         if (n->data > n->succ->data) {
@@ -177,4 +165,12 @@ void insertSort(LIST l, int data) {
     }
 }
 
+void PrintList(LIST l) {
+    NODE node = l->head;
+    while (node) {
+        printf("%d->", node->data);
+        node = node->succ;
+    }
+    printf("NULL\n");
+}
 #endif //SRTN_BUDDY_DOUBLELINKEDLIST_H

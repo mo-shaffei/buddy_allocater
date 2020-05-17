@@ -36,7 +36,7 @@ int main(int argc, char *argv[]) {
     // 4. Use this function after creating the clock process to initialize clock
     initClk();
     // To get time use this
-    /*while (!ProcQueueEmpty(gProcessQueue)) {
+    while (!ProcQueueEmpty(gProcessQueue)) {
         //get current time
         int current_time = getClk();
         //temporary process pointer
@@ -55,7 +55,7 @@ int main(int argc, char *argv[]) {
         if (is_time) //if at least one process was sent to the scheduler
             kill(gSchedulerPid, SIGUSR1); //send SIGUSR1 to the scheduler
         usleep(900000); //sleep 0.9 sec
-    }*/
+    }
     // invoke ClearResources() but use zero as parameter to indicate normal exit not interrupt
     ClearResources(0);
 }
@@ -136,7 +136,7 @@ void ReadFile() {
         pProcess->mArrivalTime = atoi(strtok(NULL, "\t"));
         pProcess->mRuntime = atoi(strtok(NULL, "\t"));
         pProcess->mPriority = atoi(strtok(NULL, "\t"));
-        pProcess->mMemsize = atoi(strtok(NULL, "\t"));
+        pProcess->mMemSize = atoi(strtok(NULL, "\t"));
         pProcess->mRemainTime = pProcess->mRuntime;
         pProcess->mWaitTime = 0;
         runtime_sum += pProcess->mRuntime;
